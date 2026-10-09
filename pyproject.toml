@@ -1,0 +1,47 @@
+[build-system]
+# <64 keeps `pip install -e .` working on old pip (<21.3) together with the setup.py shim
+requires = ["setuptools>=61,<64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pytuneslib"
+version = "0.1.0"
+description = "Generate iTunes Library.itl and iTunes Music Library.xml from a music folder"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "AlexRodry" }]
+keywords = ["itunes", "itl", "music", "library", "xml", "mutagen", "audio"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio",
+]
+dependencies = ["mutagen>=1.45", "cryptography>=3.4"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "build", "twine"]
+
+[project.scripts]
+pytuneslib = "pytuneslib.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/AlexRodry/pytuneslib"
+Repository = "https://github.com/AlexRodry/pytuneslib.git"
+Issues = "https://github.com/AlexRodry/pytuneslib/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["pytuneslib*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
