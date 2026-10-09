@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import os
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
+from . import paths
 from .limits import clamp_library
 from .model import Library, Playlist, Track
 from .scanner import scan
@@ -20,6 +22,7 @@ def write_library(
     *,
     itl: bool = True,
     music_folder: str | Path | None = None,
+    location_map: Mapping[str, str] | None = None,
 ) -> dict[str, Path]:
     """Write the XML (and, if itl, the .itl) for lib into out_dir. Returns written paths.
 
@@ -32,7 +35,7 @@ def write_library(
     out.mkdir(parents=True, exist_ok=True)
     clamp_library(lib)
     _ensure_master(lib)
-    lib.music_folder = str(Path(music_folder).resolve() if music_folder else out / "iTunes Media")
+    lib.music_folder = _music_folder(music_folder, out, location_map)
     written = {"xml": write_xml(lib, out / XML_NAME)}
     if itl:
         from .itl.writer import write_itl  # imported lazily: optional until the ITL writer lands
@@ -49,10 +52,23 @@ def build_library(
     include_unsupported: bool = False,
     kind_locale: str = "en",
     music_folder: str | Path | None = None,
+    location_map: Mapping[str, str] | None = None,
 ) -> tuple[Library, dict[str, Path]]:
     """Scan music_dir and write both library files into out_dir."""
-    lib = scan(music_dir, include_unsupported=include_unsupported, kind_locale=kind_locale)
-    return lib, write_library(lib, out_dir, itl=itl, music_folder=music_folder)
+    lib = scan(music_dir, include_unsupported=include_unsupported, kind_locale=kind_locale,
+               location_map=location_map)
+    return lib, write_library(lib, out_dir, itl=itl, music_folder=music_folder, location_map=location_map)
+
+
+def _music_folder(music_folder: str | Path | None, out: Path, location_map: Mapping[str, str] | None) -> str:
+    """The iTunes Media folder as iTunes will see it (Windows/UNC strings are never run through os.path)."""
+    if music_folder is None:
+        folder = os.path.join(os.path.abspath(out), "iTunes Media")
+    else:
+        folder = str(music_folder)
+        if not paths.is_windows(folder):
+            folder = os.path.abspath(folder)
+    return paths.map_location(folder, location_map)
 
 
 def _free_id(lib: Library) -> int:
@@ -63,7 +79,7 @@ def _free_id(lib: Library) -> int:
 def _ensure_master(lib: Library) -> None:
     """iTunes needs exactly one master "Library" playlist holding every track."""
     if not any(p.master for p in lib.playlists):
-        lib.playlists.insert(0, Playlist(playlist_id=_free_id(lib), name="Library", master=True,
+        lib.playlists.insert(0, Playlist(playlist_id=_free_id(lib), name="Library", master=True, visible=False,
                                          track_ids=[t.track_id for t in lib.tracks]))
 
 

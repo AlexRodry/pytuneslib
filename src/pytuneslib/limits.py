@@ -7,7 +7,10 @@ from .model import Library
 # iTunes 12.13 cuts tag text to 255 UTF-16 code units when it loads a library
 # (verified: a 685-char Album Artist came back as its first 255 characters).
 MAX_TEXT = 255
-TEXT_FIELDS = ("name", "artist", "album_artist", "album", "composer", "genre", "kind", "comments")
+TEXT_FIELDS = (
+    "name", "artist", "album_artist", "album", "composer", "genre", "kind", "comments",
+    "grouping", "work", "sort_name", "sort_artist", "sort_album", "sort_album_artist", "sort_composer",
+)
 
 
 def clamp_text(text: str | None, limit: int = MAX_TEXT) -> str | None:

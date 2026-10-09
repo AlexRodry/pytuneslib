@@ -110,8 +110,9 @@ Multiple values in one field are separated by NUL bytes.
 Other codes seen in the reference (meaning not established): 14, 18, 46, 63.
 
 Album records use 300 (album), 301 (album artist or artist), 302 (album artist). Artist records use 400 (name) and
-401 (sort name). Playlist records use 100 (name), 101/102 (smart-playlist info and criteria), 105/108 (view blobs)
-and 109 (plist).
+401 (sort name). Playlist records use 100 (name), 101 (Smart Criteria) and 102 (Smart Info), 105/108 (view blobs)
+and 109 (plist). The smart blobs start at `+0x18` of the chunk, not at the string offset `+0x28`; compared
+byte for byte against the XML export, all 71 smart playlists of the reference library match.
 
 ### Dates
 

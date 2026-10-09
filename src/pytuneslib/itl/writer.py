@@ -17,20 +17,24 @@ import secrets
 import struct
 import unicodedata
 from datetime import datetime, timezone
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 
 from ..limits import clamp_text
 from ..model import Library, Playlist, Track
-from ..xml_writer import path_to_file_url
+from .. import paths
 from . import _defaults as D
 from . import chunks as C
 from .crypto import encrypt_file
+from ..folders import folder_rules
 from .reader import (
     HDFM_ALBUM_COUNT, HDFM_ARTIST_COUNT, HDFM_SECTION_COUNT, HDFM_DATE, HDFM_LIBRARY_PID, HDFM_PLAYLIST_COUNT,
     HDFM_TRACK_COUNT, HDFM_TZ_OFFSET, HDFM_VERSION, I_ITEM_ID, I_TRACK_ID, MASTER_NAME_TOKEN,
     A, P, R, S_ALBUM, S_ALBUM_ARTIST, S_ALBUM_ARTIST_A, S_ALBUM_ARTIST_B, S_ALBUM_NAME,
     S_ARTIST, S_ARTIST_NAME, S_COMMENTS, S_COMPOSER, S_GENRE, S_KIND, S_NAME, S_PATH,
     S_PLAYLIST_NAME, S_URL, T, ItlFile, datetime_to_mac, pid_to_bytes,
+    ALBUM_RATING_USER, DISLIKED, LOVED, S_GROUPING, S_SMART_CRITERIA, S_SMART_INFO, S_SORT_ALBUM,
+    S_SORT_ALBUM_ARTIST, S_SORT_ARTIST, S_SORT_COMPOSER, S_SORT_NAME, S_WORK, SMART_DATA,
+    datetime_to_mac_utc,
 )
 
 # htim codec code (+0x50) by file type; observed in iTunes 12.13
@@ -89,13 +93,37 @@ def _hohm(intern: _Interner, owner: str, htype: int, text: str, *, url: bool = F
     return c
 
 
+def _blob_type(b: bytes) -> int:
+    return struct.unpack_from("<I", b, 12)[0]
+
+
+def _smart_hohm(htype: int, data: bytes) -> C.Chunk:
+    """Smart Info / Smart Criteria hohm: 24-byte header + the raw XML <data> blob."""
+    head = bytearray(SMART_DATA)
+    head[0:4] = b"mhoh"
+    struct.pack_into("<III", head, 4, SMART_DATA, SMART_DATA + len(data), htype)
+    return C.Chunk("hohm", head + data)
+
+
+def _playlist_template(p: Playlist) -> tuple[bytes, list[bytes]]:
+    """hpim header + hohm blobs (view settings, stock smart rules) captured from iTunes 12.13."""
+    if p.master:
+        return D.HPIM_MASTER, D.HPIM_MASTER_KIDS
+    if p.distinguished_kind in D.BUILTIN:
+        return D.BUILTIN[p.distinguished_kind]
+    if p.folder:
+        return D.HPIM_FOLDER, D.HPIM_FOLDER_KIDS
+    if p.smart:
+        return D.HPIM_SMART, D.HPIM_SMART_KIDS
+    return D.HPIM, D.HPIM_KIDS
+
+
 def _blob(b: bytes) -> C.Chunk:
     return C.Chunk("hohm", bytearray(b))
 
 
 def _ext(location: str) -> str:
-    name = PureWindowsPath(location).name if "\\" in location else os.path.basename(location)
-    return name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    return paths.suffix(location)
 
 
 def _codec(ext: str, kind: str | None) -> int:
@@ -127,6 +155,7 @@ class _Builder:
         self.lib = lib
         self.library_name = library_name
         self.music_folder = music_folder if music_folder is not None else lib.music_folder
+        self.folder_rules: dict[str, tuple[bytes, bytes]] = {}  # folder pid -> blobs (set in build)
         self.intern = _Interner()
         used = [t.track_id + 1 for t in lib.tracks] + [p.playlist_id for p in lib.playlists]
         self.next_id = max(used, default=0) + 1
@@ -148,6 +177,9 @@ class _Builder:
             c.head[A["persistent_id"]:A["persistent_id"] + 8] = _rand_pid()
             c.head[A["track_pid"]:A["track_pid"] + 8] = pid_to_bytes(t.persistent_id)
             c.head[HAIM_COMPILATION] = 1 if t.compilation else 0
+            if t.album_rating:
+                c.head[A["rating"]] = t.album_rating
+                c.head[A["rating_flags"]] = ALBUM_RATING_USER
             if t.album:
                 c.children.append(_hohm(self.intern, "haim", S_ALBUM_NAME, t.album))
             if key[1]:
@@ -192,7 +224,7 @@ class _Builder:
         h[T["compilation"]] = 1 if t.compilation else 0
         c.set_u32(T["play_count"], t.play_count)
         c.set_u32(T["play_count2"], t.play_count)
-        c.set_u32(T["play_date"], 0)
+        c.set_u32(T["play_date"], _mac(t.play_date))
         c.set_u16(T["disc_number"], t.disc_number or 0)
         c.set_u16(T["disc_count"], t.disc_count or 0)
         h[T["rating"]] = t.rating or 0
@@ -201,31 +233,39 @@ class _Builder:
         c.set_u16(T["artwork_count"], 0)
         struct.pack_into("<f", h, T["sample_rate"], float(t.sample_rate or 0))
         c.set_u16(T["bpm"], t.bpm or 0)
-        c.set_u32(T["skip_count"], 0)
-        c.set_u32(T["skip_date"], 0)
+        c.set_u32(T["skip_count"], t.skip_count or 0)
+        c.set_u32(T["skip_date"], _mac(t.skip_date))
+        c.set_u32(T["release_date"], datetime_to_mac_utc(t.release_date) if t.release_date else 0)
+        h[T["love"]] = LOVED if t.loved else DISLIKED if t.disliked else 0
         c.set_u32(T["album_id"], self.album_for(t))
         c.set_u32(T["artist_id"], self.artist_for(t))
 
         o = "htim"
         for htype, val in ((S_NAME, t.name), (S_ARTIST, t.artist), (S_ALBUM_ARTIST, t.album_artist),
                            (S_ALBUM, t.album), (S_GENRE, t.genre), (S_KIND, t.kind),
-                           (S_COMMENTS, t.comments), (S_COMPOSER, t.composer)):
+                           (S_COMMENTS, t.comments), (S_COMPOSER, t.composer),
+                           (S_GROUPING, t.grouping), (S_SORT_NAME, t.sort_name),
+                           (S_SORT_ALBUM, t.sort_album), (S_SORT_ARTIST, t.sort_artist),
+                           (S_SORT_ALBUM_ARTIST, t.sort_album_artist),
+                           (S_SORT_COMPOSER, t.sort_composer), (S_WORK, t.work)):
             if val:
                 c.children.append(_hohm(self.intern, o, htype, val))
         if t.location:
             c.children.append(_hohm(self.intern, o, S_PATH, t.location))
-            c.children.append(_hohm(self.intern, o, S_URL, path_to_file_url(t.location), url=True))
+            c.children.append(_hohm(self.intern, o, S_URL, paths.to_file_url(t.location), url=True))
         c.set_u32(T["hohm_count"], len(c.children))
         return c
 
     # -- playlists ------------------------------------------------------------
     def playlist(self, p: Playlist) -> C.Chunk:
-        if p.master:
-            head, kids, name = D.HPIM_MASTER, D.HPIM_MASTER_KIDS, MASTER_NAME_TOKEN
-        elif p.distinguished_kind == 4:
-            head, kids, name = D.HPIM_MUSIC, D.HPIM_MUSIC_KIDS, p.name
-        else:
-            head, kids, name = D.HPIM, D.HPIM_KIDS, p.name
+        head, kids = _playlist_template(p)
+        name = MASTER_NAME_TOKEN if p.master else p.name
+        info, criteria = p.smart_info, p.smart_criteria
+        if p.folder:  # a folder is a smart playlist "Playlist is <child>" OR ... (see folders.py)
+            rules = self.folder_rules or folder_rules(Library(playlists=[p]))  # lone playlist: no children
+            info, criteria = rules[p.persistent_id.upper()]
+        if criteria is not None:  # the playlist's own rules replace the template's
+            kids = [b for b in kids if _blob_type(b) not in (S_SMART_INFO, S_SMART_CRITERIA)]
         c = C.Chunk("hpim", bytearray(head))
         h = c.head
         c.set_u32(P["playlist_id"], p.playlist_id)
@@ -233,9 +273,15 @@ class _Builder:
         h[P["persistent_id"]:P["persistent_id"] + 8] = pid_to_bytes(p.persistent_id)
         h[P["master"]] = 1 if p.master else 0
         h[P["distinguished_kind"]] = p.distinguished_kind or 0
+        h[P["folder"]] = 1 if p.folder else 0
+        h[P["parent_pid"]:P["parent_pid"] + 8] = (
+            pid_to_bytes(p.parent_persistent_id) if p.parent_persistent_id else bytes(8))
         name_hohm = _hohm(self.intern, "hpim", S_PLAYLIST_NAME, name)
         name_hohm.set_u32(16, 0 if p.master else 4)  # as iTunes writes it (not a pool id)
         c.children.append(name_hohm)
+        if criteria is not None:
+            c.children.append(_smart_hohm(S_SMART_INFO, info or b""))
+            c.children.append(_smart_hohm(S_SMART_CRITERIA, criteria))
         c.children += [_blob(b) for b in kids]
         c.set_u32(P["hohm_count"], len(c.children))
         for tid in p.track_ids:
@@ -260,15 +306,15 @@ class _Builder:
     def build(self) -> ItlFile:
         lib = self.lib
         tracks = [self.track(t) for t in lib.tracks]
-        # Built-in playlists other than master/Music (Podcasts, Movies, ...; distinguished kinds) have
-        # no template here; iTunes recreates them on open, so they are not written.
-        playlists = [p for p in lib.playlists if p.master or p.distinguished_kind in (None, 4)]
+        playlists = list(lib.playlists)
         known = {t.track_id for t in lib.tracks}
         playlists = [dataclasses.replace(p, track_ids=[i for i in p.track_ids if i in known])
                      for p in playlists]
         if not any(p.master for p in playlists):
             playlists.insert(0, Playlist(playlist_id=self.new_id(), name="Library", master=True,
                                          track_ids=[t.track_id for t in lib.tracks]))
+        # same helper as the XML writer, on exactly the playlists written here
+        self.folder_rules = folder_rules(dataclasses.replace(lib, playlists=playlists))
         hpims = [self.playlist(p) for p in playlists]
 
         def sec(sec_type: int, *chs: C.Chunk) -> C.Section:
@@ -311,7 +357,7 @@ class _Builder:
         folder = self.music_folder
         if not folder:
             return ""
-        url = path_to_file_url(folder)
+        url = paths.to_file_url(folder)
         return url if url.endswith("/") else url + "/"
 
     def _patch_hdfm(self, h: bytearray, e: str, n_tracks: int, n_playlists: int) -> None:

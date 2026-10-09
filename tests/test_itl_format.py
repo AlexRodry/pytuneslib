@@ -13,6 +13,7 @@ from pytuneslib.itl import chunks as C
 from pytuneslib.itl.crypto import decrypt_file, encrypt_file, encode_payload, decode_payload
 from pytuneslib.itl.reader import load_itl, parse_itl, read_itl, to_library
 from pytuneslib.itl.writer import build_itl, itl_bytes, write_itl
+from pytuneslib.xml_writer import MUSIC_SMART_CRITERIA, MUSIC_SMART_INFO
 from pytuneslib.model import Library, Playlist, Track
 
 SAMPLE_ITL = Path(__file__).resolve().parent.parent / "samples" / "iTunes Library.itl"
@@ -40,8 +41,9 @@ def _lib() -> Library:
         Track(1004, r"C:\Music\Б\Ж — x.wav", name="Ж — ’quote’", artist="Б", kind="WAV audio file",
               date_added=d, date_modified=d, compilation=True),
     ]
-    pls = [Playlist(5000, "Library", [1000, 1002, 1004], master=True),
-           Playlist(5001, "Music", [1000, 1002, 1004], distinguished_kind=4),
+    pls = [Playlist(5000, "Library", [1000, 1002, 1004], master=True, visible=False),
+           Playlist(5001, "Music", [1000, 1002, 1004], distinguished_kind=4,
+                    smart_info=MUSIC_SMART_INFO, smart_criteria=MUSIC_SMART_CRITERIA),
            Playlist(5002, "Mine", [1004, 1000])]
     return Library(tracks=tracks, playlists=pls, music_folder=r"C:\Music", date=d,
                    persistent_id="0123456789ABCDEF")

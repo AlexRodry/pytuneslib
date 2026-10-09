@@ -84,15 +84,31 @@ def test_itl_edit_cycle_keeps_custom_playlists(tmp_path):
     assert names.count("One") == 1 and names.count("Two") == 1 and names.count("Library") == 1
 
 
-def test_writer_skips_builtins_and_dangling_track_ids():
-    lib = _lib(2)
-    lib.playlists = [Playlist(5000, "Library", [1000, 1002], master=True),
-                     Playlist(5001, "Podcasts", [], distinguished_kind=10),
-                     Playlist(5002, "Mine", [1000, 4242])]
+def test_writer_keeps_builtins_folders_smart_and_drops_dangling_ids():
     from pytuneslib.itl.reader import parse_itl, to_library
+
+    lib = _lib(2)
+    crit, info = b"SLst" + bytes(40), b"" + bytes(20)
+    lib.playlists = [Playlist(5000, "Library", [1000, 1002], master=True, visible=False),
+                     Playlist(5001, "Podcasts", [], distinguished_kind=10),
+                     Playlist(5002, "Genius", [], distinguished_kind=26, visible=False),
+                     Playlist(5003, "Folder", [1000, 1002], folder=True, persistent_id="00000000000000F0"),
+                     Playlist(5004, "Child", [1000, 4242], parent_persistent_id="00000000000000F0"),
+                     Playlist(5005, "Smart", [1002], smart_info=info, smart_criteria=crit,
+                              parent_persistent_id="00000000000000F0")]
     back = to_library(parse_itl(itl_bytes(lib)))
-    assert [p.name for p in back.playlists] == ["Library", "Mine"]
-    assert back.playlists[1].track_ids == [1000]
+    by = {p.name: p for p in back.playlists}
+    assert list(by) == ["Library", "Podcasts", "Genius", "Folder", "Child", "Smart"]
+    assert by["Podcasts"].distinguished_kind == 10 and by["Genius"].visible is False
+    assert by["Folder"].folder and by["Child"].parent_persistent_id == "00000000000000F0"
+    assert by["Child"].track_ids == [1000]  # dangling 4242 dropped
+    assert (by["Smart"].smart_info, by["Smart"].smart_criteria) == (info, crit)
+    assert by["Smart"].parent_persistent_id == "00000000000000F0"
+    # a folder is written as iTunes does it: smart rules "Playlist is <child>" for each child
+    from pytuneslib.itl.folders import FOLDER_SMART_INFO, criteria_children
+    assert by["Folder"].smart_info == FOLDER_SMART_INFO
+    children = [p.persistent_id for p in lib.playlists if p.parent_persistent_id == "00000000000000F0"]
+    assert criteria_children(by["Folder"].smart_criteria) == children
 
 
 def test_build_library_end_to_end_with_playlist(music_dir, tmp_path):
@@ -112,14 +128,32 @@ def _blobs():
             yield k, v
         elif isinstance(v, list):
             yield from ((f"{k}[{i}]", b) for i, b in enumerate(v))
+    for kind, (head, kids) in D.BUILTIN.items():
+        yield f"BUILTIN_HEAD[{kind}]", head
+        yield from ((f"BUILTIN[{kind}][{i}]", b) for i, b in enumerate(kids))
 
 
 def test_defaults_have_no_source_library_dates():
-    singletons = {"HGHM", "HTIM", "HPIM_MASTER", "HPIM_MUSIC", "HPIM"}
+    singletons = {"HGHM", "HTIM", "HPIM_MASTER", "HPIM_MUSIC", "HPIM", "HPIM_FOLDER", "HPIM_SMART"}
     for k, b in _blobs():
-        if k in singletons:
+        if k in singletons or k.startswith("BUILTIN_HEAD"):
             dates = [hex(o) for o in range(0x10, len(b) - 3, 4)
                      if 0xB2000000 <= struct.unpack_from("<I", b, o)[0] < 0xF0000000]
             assert dates == [], k
         assert set(re.findall(rb"<date>([^<]*)</date>", b)) <= {b"2001-01-01T00:00:00Z"}, k
     assert struct.unpack_from("<II", D.HPIM_MASTER, 0x20) == (0, 0)  # source library totals
+
+
+def test_xml_and_itl_write_identical_folder_rules(tmp_path):
+    """Both writers derive folder blobs from pytuneslib.folders.folder_rules, so they cannot diverge."""
+    lib = _lib(3)
+    lib.playlists = [Playlist(5000, "Library", [1000, 1002, 1004], master=True, visible=False),
+                     Playlist(5001, "F", [1000, 1002], folder=True, persistent_id="00000000000000F0"),
+                     Playlist(5002, "A", [1000, 4242], parent_persistent_id="00000000000000F0"),
+                     Playlist(5003, "B", [1002], parent_persistent_id="00000000000000F0")]
+    files = write_library(lib, tmp_path)
+    x = next(p for p in read_xml(files["xml"]).playlists if p.folder)
+    i = next(p for p in read_itl(files["itl"]).playlists if p.folder)
+    assert (x.smart_info, x.smart_criteria) == (i.smart_info, i.smart_criteria)
+    from pytuneslib.itl.folders import criteria_children
+    assert criteria_children(i.smart_criteria) == [p.persistent_id for p in lib.playlists[2:]]

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pytuneslib"
-version = "0.1.0"
+version = "0.2.0"
 description = "Generate iTunes Library.itl and iTunes Music Library.xml from a music folder"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -45,3 +45,4 @@ include = ["pytuneslib*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = ["acceptance: round-trip checks against a real library copy in samples/ (skipped when absent)"]

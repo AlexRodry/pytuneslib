@@ -19,7 +19,7 @@ def utcnow() -> datetime:
 @dataclass
 class Track:
     track_id: int
-    location: str  # absolute filesystem path
+    location: str  # absolute path as iTunes sees it (Windows drive path or UNC \\server\share\...)
     persistent_id: str = field(default_factory=new_persistent_id)
     name: str | None = None
     artist: str | None = None
@@ -44,6 +44,20 @@ class Track:
     rating: int | None = None  # 0-100
     comments: str | None = None
     compilation: bool = False
+    grouping: str | None = None
+    loved: bool = False
+    disliked: bool = False
+    play_date: datetime | None = None  # last played
+    skip_count: int = 0
+    skip_date: datetime | None = None  # last skipped
+    release_date: datetime | None = None
+    album_rating: int | None = None  # 0-100
+    work: str | None = None
+    sort_name: str | None = None
+    sort_artist: str | None = None
+    sort_album: str | None = None
+    sort_album_artist: str | None = None
+    sort_composer: str | None = None
 
 
 @dataclass
@@ -53,7 +67,17 @@ class Playlist:
     track_ids: list[int] = field(default_factory=list)
     persistent_id: str = field(default_factory=new_persistent_id)
     master: bool = False  # the "Library" playlist
-    distinguished_kind: int | None = None  # 4 = Music, etc.
+    distinguished_kind: int | None = None  # 4 = Music, 10 = Podcasts, 26 = Genius, ...
+    visible: bool = True  # False for hidden built-ins
+    folder: bool = False  # playlist folder: track_ids are the union of its children
+    parent_persistent_id: str | None = None  # containing folder, if any
+    # Smart playlists: opaque iTunes blobs ("Smart Info" / "Smart Criteria"), kept byte-for-byte
+    smart_info: bytes | None = None
+    smart_criteria: bytes | None = None
+
+    @property
+    def smart(self) -> bool:
+        return self.smart_criteria is not None
 
 
 @dataclass

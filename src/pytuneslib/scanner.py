@@ -6,12 +6,16 @@ from __future__ import annotations
 import re
 import unicodedata
 from datetime import datetime, timezone
+import os
+from collections.abc import Mapping
 from pathlib import Path
 
 import mutagen
 from mutagen.mp4 import MP4
 
+from . import paths
 from .model import Library, Playlist, Track, new_persistent_id, utcnow
+from .xml_writer import MUSIC_SMART_CRITERIA, MUSIC_SMART_INFO
 
 # extensions iTunes can play
 SUPPORTED_EXTS = {".mp3", ".m4a", ".m4b", ".aac", ".wav", ".aif", ".aiff"}
@@ -223,7 +227,13 @@ def _bit_rate_kbps(info, size: int, seconds: float) -> int | None:
     return int(round(br / 1000)) if br else None
 
 
-def scan_file(path: Path, track_id: int, *, kind_locale: str = "en") -> Track | None:
+def scan_file(
+    path: Path,
+    track_id: int,
+    *,
+    kind_locale: str = "en",
+    location_map: Mapping[str, str] | None = None,
+) -> Track | None:
     ext = path.suffix.lower()
     tags = _read_tags(path, ext)
     info = tags.pop("_info", None)
@@ -241,7 +251,7 @@ def scan_file(path: Path, track_id: int, *, kind_locale: str = "en") -> Track | 
     tags.setdefault("compilation", False)
     return Track(
         track_id=track_id,
-        location=str(path),
+        location=paths.map_location(str(path), location_map),
         size=st.st_size,
         total_time=int(round(seconds * 1000)),
         bit_rate=_bit_rate_kbps(info, st.st_size, seconds),
@@ -260,13 +270,18 @@ def scan(
     include_unsupported: bool = False,
     kind_locale: str = "en",
     music_folder: str | Path | None = None,
+    location_map: Mapping[str, str] | None = None,
 ) -> Library:
     """Walk music_dir and build a Library with master 'Library' and 'Music' playlists.
 
     Files are visited in sorted path order so track IDs are deterministic.
     FLAC/OGG/... are skipped unless include_unsupported (iTunes can't play them).
+
+    Track locations are what iTunes will see, not necessarily what this machine sees: location_map
+    rewrites path prefixes, e.g. scanning on Linux for Windows iTunes:
+    ``location_map={"/mnt/nas/music": "\\\\NAS\\music"}`` (see pytuneslib.paths.map_location).
     """
-    root = Path(music_dir).resolve()
+    root = Path(os.path.abspath(music_dir))  # abspath, not resolve(): keep mapped drive letters
     exts = SUPPORTED_EXTS | (UNSUPPORTED_EXTS if include_unsupported else set())
     files = sorted(
         (p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in exts),
@@ -275,19 +290,20 @@ def scan(
     tracks: list[Track] = []
     tid = FIRST_TRACK_ID
     for p in files:
-        t = scan_file(p, tid, kind_locale=kind_locale)
+        t = scan_file(p, tid, kind_locale=kind_locale, location_map=location_map)
         if t is None:
             continue
         tracks.append(t)
         tid += 2  # iTunes allocates even ids in the sample
     ids = [t.track_id for t in tracks]
     playlists = [
-        Playlist(FIRST_PLAYLIST_ID, "Library", list(ids), master=True),
-        Playlist(FIRST_PLAYLIST_ID + 1, "Music", list(ids), distinguished_kind=4),
+        Playlist(FIRST_PLAYLIST_ID, "Library", list(ids), master=True, visible=False),
+        Playlist(FIRST_PLAYLIST_ID + 1, "Music", list(ids), distinguished_kind=4,
+                 smart_info=MUSIC_SMART_INFO, smart_criteria=MUSIC_SMART_CRITERIA),
     ]
     return Library(
         tracks=tracks,
         playlists=playlists,
-        music_folder=str(Path(music_folder).resolve() if music_folder else root),
+        music_folder=paths.map_location(str(music_folder or root), location_map),
         date=utcnow(),
     )

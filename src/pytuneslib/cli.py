@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from .builder import build_library
+from .paths import parse_path_map
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -18,7 +19,10 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--no-itl", action="store_true", help="only write the XML")
     b.add_argument("--include-unsupported", action="store_true", help="also add FLAC/OGG/...")
     b.add_argument("--kind-locale", default="en", choices=["en", "es"])
-    b.add_argument("--music-folder", type=Path, help="iTunes Media folder (default: <out_dir>/iTunes Media)")
+    b.add_argument("--music-folder", help="iTunes Media folder as iTunes sees it (default: <out_dir>/iTunes Media)")
+    b.add_argument("--path-map", action="append", default=[], metavar="SRC=DST",
+                   help="rewrite track path prefix SRC (this machine) to DST (as iTunes sees it), "
+                        "e.g. /mnt/nas/music=\\\\NAS\\music; repeatable")
     args = ap.parse_args(argv)
 
     out = args.out_dir.resolve()
@@ -27,6 +31,10 @@ def main(argv: list[str] | None = None) -> int:
     if not args.music_dir.is_dir():
         ap.error(f"not a directory: {args.music_dir}")
 
+    try:
+        location_map = parse_path_map(args.path_map)
+    except ValueError as e:
+        ap.error(str(e))
     lib, written = build_library(
         args.music_dir,
         out,
@@ -34,6 +42,7 @@ def main(argv: list[str] | None = None) -> int:
         include_unsupported=args.include_unsupported,
         kind_locale=args.kind_locale,
         music_folder=args.music_folder,
+        location_map=location_map,
     )
     print(f"{len(lib.tracks)} tracks")
     for kind, path in written.items():

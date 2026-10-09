@@ -17,6 +17,7 @@ Never point the writers at the library iTunes is currently using.
 """
 
 from .builder import add_playlist, build_library, write_library
+from .itl.document import ItlDocument
 from .itl.reader import read_itl
 from .itl.writer import itl_bytes, write_itl
 from .model import Library, Playlist, Track
@@ -24,9 +25,10 @@ from .scanner import scan
 from .xml_reader import read_xml
 from .xml_writer import write_xml
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
+    "ItlDocument",
     "Library",
     "Playlist",
     "Track",

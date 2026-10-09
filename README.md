@@ -55,6 +55,7 @@ Options:
 | `--include-unsupported` | Also scan FLAC, OGG, Opus and WMA. iTunes cannot play these, so they are skipped by default. |
 | `--kind-locale en\|es` | Language of the "Kind" field, for example `MPEG audio file` (`en`) or `Archivo de audio MPEG` (`es`). Default `en`. |
 | `--music-folder PATH` | Music Folder to store in the library. Default: `<out_dir>/iTunes Media`. |
+| `--path-map SRC=DST` | Rewrite the track path prefix `SRC` (as this machine sees it) to `DST` (as iTunes sees it). Repeatable. Example for Linux to Windows iTunes: `--path-map "/mnt/nas/music=\\NAS\music"`. |
 
 ## Quickstart: Python
 
@@ -103,6 +104,29 @@ write_library(lib, "D:/pytuneslib-out/with-playlist", music_folder=lib.music_fol
 
 Pass `music_folder=lib.music_folder` when rewriting a library you read, so the Music Folder stays the one it had. Without it, `write_library` uses `<out_dir>/iTunes Media`.
 
+### Edit an existing .itl in place
+
+`ItlDocument` changes only the playlists you touch; every other byte of the library (tracks, play counts, folders, smart rules, view settings) is written back exactly as iTunes left it. Saving without edits produces an identical file.
+
+```python
+from pytuneslib import ItlDocument
+
+doc = ItlDocument.open("D:/MyLib/iTunes Library.itl")
+lib = doc.library  # read-only Library view of the current state
+
+folder = doc.add_playlist("Sets", folder=True)
+techno = [t.track_id for t in lib.tracks if t.genre == "Techno"]
+mix = doc.add_playlist("Friday", techno, parent=folder.persistent_id)
+
+doc.update_playlist(mix.persistent_id, name="Friday mix", track_ids=techno[:30])
+doc.update_playlist(mix.persistent_id, parent=None)        # move to the top level
+doc.remove_playlist(folder.persistent_id)                   # recursive=True for non-empty folders
+
+doc.save("D:/MyLib-edited/iTunes Library.itl")
+```
+
+Smart playlists can be added with their raw rule blobs (`smart_info=`, `smart_criteria=`, the same bytes as the XML `<data>` values); their rules are never re-encoded.
+
 ### Scan without writing
 
 ```python
@@ -131,6 +155,12 @@ All three types are plain dataclasses in `pytuneslib.model`.
 | `play_count` | `int` | Default `0`. |
 | `rating` | `int \| None` | 0–100. |
 | `compilation` | `bool` | Default `False`. |
+| `grouping`, `work` | `str \| None` | Tags. |
+| `loved`, `disliked` | `bool` | Default `False`. |
+| `play_date`, `skip_date`, `release_date` | `datetime \| None` | UTC. |
+| `skip_count` | `int` | Default `0`. |
+| `album_rating` | `int \| None` | 0–100. |
+| `sort_name`, `sort_artist`, `sort_album`, `sort_album_artist`, `sort_composer` | `str \| None` | Sort keys. |
 
 **`Playlist`**
 
@@ -142,6 +172,10 @@ All three types are plain dataclasses in `pytuneslib.model`.
 | `persistent_id` | `str` | Random by default. |
 | `master` | `bool` | `True` for the "Library" playlist. |
 | `distinguished_kind` | `int \| None` | For example `4` for the Music playlist. |
+| `visible` | `bool` | `False` for hidden built-in playlists. Default `True`. |
+| `folder` | `bool` | `True` for a playlist folder. Its `track_ids` are the union of its children. |
+| `parent_persistent_id` | `str \| None` | Persistent ID of the containing folder, if any. |
+| `smart_info`, `smart_criteria` | `bytes \| None` | Raw iTunes smart-playlist blobs, kept byte for byte. |
 
 **`Library`**
 
@@ -184,7 +218,8 @@ To go back to your own library, quit iTunes and repeat the steps, choosing your 
 
 ## Limitations
 
-- **Not modeled:** artwork, play history (play dates and skip counts), smart playlists, and folder playlists. They are not written, and are not read back when they exist.
+- **Not modeled:** artwork. The build command does not create smart playlists or folders from a music folder; they come from a library you read and rewrite (see [Edit an existing .itl in place](#edit-an-existing-itl-in-place)).
+- **Built-in playlists:** the writers keep the built-in playlists (Movies, TV Shows, Podcasts, and so on) that the library already has.
 - **Up Next queue:** not written. iTunes 12.13 rejects a library that includes this section.
 - **Kind strings:** `Track.kind` uses the English or Spanish display string (`--kind-locale`). Other languages are not supported.
 - **Tested only** with iTunes 12.13.11.1 on Windows (Microsoft Store build). Other versions and platforms are untested.

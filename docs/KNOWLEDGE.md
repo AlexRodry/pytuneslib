@@ -71,10 +71,12 @@ Tests: `tests/test_itl_format.py`.
   +0x1C byte len, +0x28 data. Encoding: **3 = Latin-1** (used when all chars ≤ U+00FF), **1 = UTF-16LE**
   otherwise, **2 = ASCII** (URLs). Multi-value tags separated by NUL (XML shows space).
 - Track types: 2 name, 3 album, 4 artist, 5 genre, 6 kind, 8 comments, 11 location URL, 12 composer,
-  13 Windows path (stale, may be old user dir), 14 grouping?, 18 ?, 27 album artist, 30–34 sort fields,
-  46 ?, 63 ?. Order in iTunes: 2,4,27,3,5,6,8,…,13,11. Album: 300 album, 301 album-artist-or-artist,
+  13 Windows path (stale, may be old user dir), 14 grouping, 18 ?, 27 album artist, 30 sort name,
+  31 sort album, 32 sort artist, 33 sort album artist, 34 sort composer, 46 ?, 63 work. Order in iTunes: 2,4,27,3,5,6,8,…,13,11. Album: 300 album, 301 album-artist-or-artist,
   302 album artist. Artist: 400 name, 401 sort. Playlist: 100 name (master = `####!####`, localized by iTunes),
-  101/102 smart info/criteria, 105 ×2 + 108 view blobs, 109 plist.
+  **101 = Smart Criteria, 102 = Smart Info** (payload from +0x18 to the end = the XML `<data>` blob
+  byte-for-byte, verified on all 71), 103 (Podcasts only, 40 B), 105 ×2 + 108 view/column blobs (no ids),
+  109 per-playlist view-state plist (`lastViewedPlaylist`...; optional, writer omits it).
 
 ### String pools (hohm +0x10) — verified on the sample, 0 violations
 - Same string → same id, distinct strings → distinct ids, **case-sensitive, exact code points**. iTunes resolves
@@ -94,7 +96,11 @@ Tests: `tests/test_itl_format.py`.
 (`MP3 `, `M4A `, `AIFF`, `WAV `) · 0x90 u16 Artwork Count · 0x98 f32 Sample Rate · 0xA4 u16 BPM · 0xD8 Skip Count ·
 0xDC album id (→haim) · 0xF0 encoder delay · 0xF4 sample count · 0x100 encoder padding · 0x11C Skip Date ·
 0x120 audio byte len · 0x128 =2 for lossless/PCM · 0x144 Size copy · 0x1E0 artist id (→hiim, keyed by album
-artist or artist) · 0x1F4 track_id+1 · 0x290–0x2AB loudness/analysis data.
+artist or artist) · 0x1F4 track_id+1 · 0x290–0x2AB loudness/analysis data · **0xA0 Release Date (UTC mac
+secs, NOT local)** · 0x2BF u8 love: 2 = Loved (15/15 vs XML), 3 = Disliked (inferred; not in the sample),
+1 seen on 3 tracks with neither flag in the XML. Play Date 0x64 and Skip Date 0x11C are local like the others.
+Album rating lives on haim: +0x28 value, +0x29 flags 0x01 user-set / 0x20 computed → model `album_rating` only
+when 0x01 (mirrors track rating vs "Rating Computed"). All checked: 0 mismatches vs XML on 2101 tracks.
 - **Dates**: mac seconds since 1904-01-01 in **local wall-clock time, DST-aware** (Sept dates +2h, Dec +1h on
   this machine) → convert via the system timezone, not the header tz offset.
 - XML "Rating Computed" = album rating (haim +0x28) shown for unrated tracks; haim +0x29 flags 0x01 user /
@@ -105,7 +111,22 @@ artist or artist) · 0x1F4 track_id+1 · 0x290–0x2AB loudness/analysis data.
   member track, 0x28 album rating.
 - hiim (100): 0x0C hohm count, 0x10 artist id, 0x14 PID.
 - hpim (3500): 0x0C hohm count, 0x10 item count, 0x16 master flag, 0x1B8 PID, 0x20A folder flag,
-  0x210 parent PID, 0x239 u8 Distinguished Kind, 0xD40 Playlist ID. XML omits some empty built-in playlists.
+  0x210 parent PID (8 B reversed, 0 = top level), 0x239 u8 Distinguished Kind, 0xD40 Playlist ID, 0x1C
+  creation date. hdfm 0x48 = number of hpim (179 in the sample, hidden ones included).
+- **Counts (ITL is the truth)**: sample and samples/live both have 179 hpim, 41 folders (+0x20A = 1),
+  134 with a parent, 76 smart (hohm 101), 13 built-ins. The XML export has 174 / 41 / 134 / 71 / 8: it omits
+  5 hidden built-in smart playlists (kinds 7, 26 Genius, 47, 48, 64), so reader sets `visible=False` for
+  those kinds and for the master. The user-reported 42 / 146 / 72 could not be reproduced from either file.
+- **A folder is a smart playlist** (found via iTunes probe: our flag-only folder lost its folder status on
+  re-save). Every real folder (41/41) has +0x20A = 1 AND hohm 102/101: one shared Smart Info (112 B,
+  `0101000300000002000000190000000000000007` + zeros) and Smart Criteria = `SLst` header (136 B, u32 BE rule
+  count at +8, match-any) + one 124-byte rule per DIRECT child: field 0x28 "Playlist", op 1 "is", child pid at
+  rule+0x38 and +0x50. Rule order is iTunes' (differs from hpim order in 20/41). `itl/folders.py` generates it
+  (byte-identical for all 41 sample folders); the writer keeps an existing blob when it already lists exactly the
+  children, ItlDocument refreshes the parent folders' rules on add/move/remove. Folders therefore also count as
+  `smart` in the model (as in the XML, where all 41 folders have Smart Info/Criteria).
+- Folders and smart playlists both carry their hptm item lists (folder = union of children, smart = cached
+  result; 11 smart + 2 folders have none).
 - hptm (84): 0x10 item id, 0x18 track id, 0x20 u16 ?, 0x44 8 random bytes (item PID?).
 
 ### Writer strategy
@@ -118,8 +139,15 @@ artist or artist) · 0x1F4 track_id+1 · 0x290–0x2AB loudness/analysis data.
   date-looking u32 in the singleton templates (hghm +0x10/+0x14/+0xE0/+0xF4/+0xFC, hpim +0x274/+0xC70) is zeroed
   by `tools/gen_itl_defaults.py`, as are the master playlist's library totals (+0x20/+0x24) and the podcast
   plist `<date>` (→ 2001-01-01). A fresh iTunes library also has 0 at those hghm offsets.
-- Playlists: master / Music (kind 4) / regular only. Other built-ins (distinguished kind ≠ 4) are not written
-  (iTunes recreates them; writing them as regular playlists would duplicate them). Dangling track ids dropped.
+- Playlists: every playlist is written. Header + view blobs come from per-kind templates captured by
+  `tools/gen_itl_defaults.py`: master, each built-in kind in the sample (2,3,4,5,7,10,26,47,48,64–67, with
+  iTunes' stock smart rules = the XML's for all of them), folder, smart, plain. Own `smart_info`/`smart_criteria`
+  replace the template's rules; folder flag + parent pid set from the model. Dangling track ids dropped.
+  Not yet probed in iTunes for a library containing folders/smart/built-ins written from scratch.
+- **Edit mode** (`pytuneslib.itl.document.ItlDocument`): parses the chunk tree (re-serialising it is
+  byte-identical for sample, live copy and oracle), edits only the touched hpim (name hohm, hptm list, parent
+  pid; kept items keep their bytes), appends new hpim built like the writer's, recomputes lengths/counts and
+  hdfm 0x48 in both headers. New ids = max over all ids in the file + 1. No edits ⇒ original bytes returned.
 - `write_itl` refuses to write into `~/Music/iTunes` (override env `PYTUNESLIB_ALLOW_LIVE=1`).
 - Verified: synthetic Library and full sample → itl_bytes → read_itl round-trip with 0 diffs.
 
@@ -154,46 +182,70 @@ Source: samples/iTunes Music Library.xml (iTunes 12.13.11.1, 2101 tracks, 160 pl
 - Strings use **numeric entities**: `&` -> `&#38;`, `<` -> `&#60;`, `>` -> `&#62;`. Quotes left raw. Never `&amp;`.
 - Scalars are on one line with their key: `<key>Size</key><integer>7183671</integer>`. Bool: `<true/>`/`<false/>`.
 - `<date>` = `YYYY-MM-DDTHH:MM:SSZ` (UTC, no fraction). `Play Date` is a raw integer (Mac epoch secs), `Play Date UTC` is a date.
-- `<data>`: base64 wrapped at 72 chars/line, each line indented one tab deeper than `<data>`.
+- `<data>`: base64 wrapped at 72 chars/line, lines indented like `<data>` itself.
 - Raw newlines inside string values are kept as-is (some are `\r\n`, some `\n`); XML parsers normalise `\r\n`->`\n`, so that is not recoverable via plistlib (harmless).
 
 **Top-level key order**: Major Version(1), Minor Version(1), Application Version, Date, Features(5), Show Content Ratings(true),
 Library Persistent ID, Tracks, Playlists, Music Folder (last, after Playlists).
 `Tracks` is a dict keyed by the track id as string, in library order (ascending-ish ids, even numbers).
 
-**Track dict key order** (omitted when absent; derived by merging all 2101 sample orders, no conflicts):
+**Track dict key order** (omitted when absent; topological sort over all 2101 sample tracks, no conflicts; Disliked is a guess):
 Track ID, Size, Total Time, Disc Number, Disc Count, Track Number, Track Count, Year, BPM, Date Modified, Date Added, Bit Rate,
-Sample Rate, Volume Adjustment, Play Count, Play Date, Play Date UTC, Skip Count, Skip Date, Release Date, Loved, Rating,
-Rating Computed, Album Rating, Album Rating Computed, Compilation, Artwork Count, Persistent ID, Explicit, Track Type,
-Purchased, File Folder Count, Library Folder Count, Name, Artist, Album Artist, Composer, Album, Grouping, Genre, Kind,
-Comments, Work, Sort Name, Sort Album, Sort Artist, Sort Album Artist, Sort Composer, Location.
+Sample Rate, Volume Adjustment, Play Count, Play Date, Play Date UTC, Skip Count, Skip Date, Release Date, Rating,
+Rating Computed, Album Rating, Album Rating Computed, Compilation, Loved, (Disliked), Artwork Count, Persistent ID, Explicit,
+Track Type, Purchased, File Folder Count, Library Folder Count, Name, Artist, Album Artist, Composer, Album, Grouping, Genre,
+Kind, Comments, Sort Name, Sort Album, Sort Artist, Sort Album Artist, Sort Composer, Work, Location.
 - Numeric/date metadata first, then Persistent ID / Track Type, then folder counts, then strings, **Location last**.
 - `Track Type` always `File` for local files. `File Folder Count`/`Library Folder Count` = `5`/`1` for files inside the iTunes Media
   folder, `-1`/`-1` otherwise (2 odd tracks in sample have -1 even inside media; writer uses 5/1 when under Music Folder).
-- Booleans (`Compilation`, `Loved`, `Explicit`, ...) only present when true.
+- Booleans (`Compilation`, `Loved`, `Explicit`, ...) only present when true. `Play Count`/`Skip Count` only when > 0.
+- `Play Date` is a raw integer: seconds since 1904-01-01 in **local time** (not UTC; sample is UTC+1/+2 with DST per date);
+  `Play Date UTC` is the real instant. Writer derives the raw value from the system time zone (verified: 585/585 identical here,
+  Europe/Madrid); reader prefers `Play Date UTC`. Test drops the raw value when the machine's tz differs from the sample's.
+- `Rating Computed` / `Album Rating Computed` (true) mean the value is derived from the album, not set by the user. The reader
+  returns `None` for such `rating`/`album_rating` (the ITL stores none), so those keys are not written back.
 - `Kind` is **localized** to the iTunes UI language (sample is Spanish: `Archivo de audio MPEG`, `Archivo de audio AAC`,
   `Archivo de audio AIFF`, `Archivo de audio WAV`; ALAC is the unlocalized `Audio Apple Lossless`). English: `MPEG audio file`,
   `AAC audio file`, `Apple Lossless audio file`, `WAV audio file`, `AIFF audio file`. scanner has `kind_locale="en"|"es"`.
 - `Location` = `file://localhost/C:/Users/...` forward slashes, drive letter + `:` unescaped, UTF-8 percent-encoded
   (`%C3%AB`), space `%20`, `[` `]` -> `%5B` `%5D`, `#` -> `%23`, and left raw: `! $ & ' ( ) * + , ; = @ ~ : /`.
-  Then XML-escaped (`&` -> `&#38;`) on top.
+  Then XML-escaped (`&` -> `&#38;`) on top. All path/URL logic lives in `pytuneslib/paths.py` (see "Paths" below).
 
-**Playlists** (array of dicts):
-- Master ("Library"; name localized, e.g. `Biblioteca`): `Master`(true), Playlist ID, Playlist Persistent ID, All Items(true),
-  `Visible`(false), Name, Playlist Items.
-- Distinguished (Music = kind 4): Playlist ID, Playlist Persistent ID, Distinguished Kind, `Music`(true) , All Items, Name,
-  Smart Info(data 112 B), Smart Criteria(data 384 B), Playlist Items. Blobs are constants copied into `xml_writer.MUSIC_SMART_*`.
-  Other kinds seen: 2 Movies, 3 TV Shows, 5 Podcasts, 10 Audiobooks?, 65/66/67 (Downloaded etc.) each with own flag key.
-- Normal user playlist: Playlist ID, [Parent Persistent ID], Playlist Persistent ID, All Items, [Folder], Name, [Smart Info, Smart Criteria], Playlist Items.
-- `Playlist Items` = array of `<dict><key>Track ID</key><integer>N</integer></dict>`; **omitted when empty**.
-- Reader maps folders/smart playlists to plain `Playlist` (smart criteria/parent/folder are lost; not in model).
+**Playlists** (array of dicts). Merged key order over all 174 playlists of both samples (no conflicts):
+`Master`, Playlist ID, `Parent Persistent ID`, Playlist Persistent ID, `Distinguished Kind`, `<kind flag>`, All Items, `Visible`,
+`Folder`, Name, `Smart Info`, `Smart Criteria`, Playlist Items. Everything after `Tracks` (all playlists + Music Folder) is
+byte-identical to the sample (`test_playlists_and_music_folder_byte_identical`, both `samples/` and `samples/live/`).
+- Master ("Library"; name localized, e.g. `Biblioteca`): Master, Playlist ID, Playlist Persistent ID, All Items, `Visible`(false), Name,
+  Playlist Items. Model: `master=True, visible=False` (`Visible` is written exactly when `visible` is False).
+- `Distinguished Kind` + flag key: 2 `Movies`, 3 `TV Shows`, 4 `Music`, 5 `Audiobooks`, 10 `Podcasts`; 65, 66, 67 (the three
+  "Downloaded" lists) have **no** flag. Other kinds (47, 48, 26, 64, 7 = Videoclips, Home Videos, Genius, ...) exist only in the ITL.
+- Smart playlists: `Smart Info` (112 B) and `Smart Criteria` (384+ B) are `<data>` blobs kept byte for byte in
+  `Playlist.smart_info/smart_criteria`. Music (kind 4) without blobs gets the sample's constants (`xml_writer.MUSIC_SMART_*`).
+- Folders: `Folder`(true) after `All Items`; children point to them with `Parent Persistent ID` (before `Playlist Persistent ID`).
+  A folder's `Playlist Items` is the union of its children's tracks. Folders may also carry Smart Info/Criteria.
+- `Playlist Items` = array of `<dict><key>Track ID</key><integer>N</integer></dict>`; **omitted when empty** (also for the
+  special lists Movies/TV/Podcasts/Audiobooks in the sample).
+- `<data>` base64 lines have the **same indent as `<data>`** (3 tabs), 72 chars per line (an earlier note said one tab deeper: wrong).
 
-**Model limits**: fields not in `model.py` (Skip Count, Play Date, Artwork Count, Release Date, Sort *, Grouping, Work, Loved, ...) are not
-written/read.
+**Not modeled (dropped on read, never written)**: Volume Adjustment, Rating Computed, Album Rating Computed, Artwork Count, Explicit,
+Purchased, Track Type (always File), Features / Show Content Ratings (constants), Play Date raw (derived). Playlist sort/view
+settings do not exist in the XML. `File Folder Count`/`Library Folder Count` are derived (5/1 or -1/-1).
 
-**Scanner notes** (`scanner.scan(music_dir, include_unsupported=False, kind_locale="en")`): mp3/m4a/m4b/aac/wav/aif/aiff via mutagen;
+**Paths** (`paths.py`, pure string functions, same result on Linux/macOS/Windows; never `os.path` on a location):
+- `Track.location` is the path *as the iTunes that opens the library sees it*: `C:\Music\a.mp3`, UNC `\\NAS\music\a.mp3`, or a POSIX
+  path for iTunes on macOS. Windows paths always use backslashes in the model.
+- URLs: drive -> `file://localhost/C:/Music/a.mp3` (verified); UNC -> `file://localhost//NAS/music/a.mp3` (**not in the sample**,
+  matches how iTunes writes network shares as far as known; verify against a real network track); POSIX -> `file://localhost/Users/x/a.mp3`.
+  `from_file_url` also accepts `file:///C:/..`, `file://server/share/..`, `file:////server/share/..`.
+- Scanning on one OS for iTunes on another: `scan(dir, location_map={"/mnt/nas/music": r"\\NAS\music"})` or CLI
+  `--path-map SRC=DST` (repeatable). Longest source prefix wins, whole path components only, case-insensitive for Windows sources;
+  the remainder takes the destination's separator style. `scan` uses `os.path.abspath`, not `resolve()` (keeps mapped drive letters).
+  `--music-folder` accepts a Windows/UNC string even on Linux; the default `<out_dir>/iTunes Media` is mapped too.
+
+**Scanner notes** (`scanner.scan(music_dir, include_unsupported=False, kind_locale="en", location_map=None)`): mp3/m4a/m4b/aac/wav/aif/aiff via mutagen;
 flac/ogg/opus/wma skipped by default. ID3 read raw (EasyID3 can't see WAV/AIFF tags); `TXXX:comment` accepted as comment fallback
 (ffmpeg writes that). Untagged -> Name = file stem. Ids start at 1000 step 2, playlists 5000/5001. Date Modified = mtime, Date Added = min(ctime, mtime).
+The scanner does not read the new track fields (grouping, loved, plays, sort tags); only the XML/ITL readers do.
 Install: pip 21.2 here, so `setup.py` shim + `setuptools<64` pin make `pip install -e .` work.
 
 ## Research: existing libs / docs (pgHaiku)

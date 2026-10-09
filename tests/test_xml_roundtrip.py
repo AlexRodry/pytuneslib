@@ -1,4 +1,6 @@
 import dataclasses
+import pytest
+from conftest import ROOT
 import plistlib
 import re
 from datetime import datetime, timezone
@@ -32,10 +34,13 @@ MODELED = {
     "Track Count", "Year", "BPM", "Date Modified", "Date Added", "Bit Rate", "Sample Rate",
     "Play Count", "Rating", "Compilation", "Persistent ID", "Track Type", "Name", "Artist",
     "Album Artist", "Composer", "Album", "Genre", "Kind", "Comments", "Location",
+    "Grouping", "Loved", "Disliked", "Play Date", "Play Date UTC", "Skip Count", "Skip Date",
+    "Release Date", "Album Rating", "Work", "Sort Name", "Sort Artist", "Sort Album",
+    "Sort Album Artist", "Sort Composer",
 }
 
 
-def _track_blocks(raw: bytes) -> dict[str, list[str]]:
+def _track_blocks(raw: bytes, drop_local: bool = False) -> dict[str, list[str]]:
     """track id -> list of entry strings (CRLF-split), limited to modeled keys."""
     text = raw.decode("utf-8")
     body = text[text.index("\t<key>Tracks</key>"): text.index("\t<key>Playlists</key>")]
@@ -45,22 +50,52 @@ def _track_blocks(raw: bytes) -> dict[str, list[str]]:
         keep = []
         keys = [re.match(r"\t\t\t<key>([^<]*)</key>", e).group(1) for e in entries]
         for key, e in zip(keys, entries):
-            if key == "Rating" and "Rating Computed" in keys:
+            if key in ("Rating", "Album Rating") and f"{key} Computed" in keys:
                 continue  # computed ratings are not user ratings; reader drops them
+            if key == "Play Date" and not drop_local:
+                pass
+            elif key == "Play Date":
+                continue  # raw local-time seconds depend on this machine's timezone
             if key in MODELED:
                 keep.append(e.replace("\r\n", "\n"))  # XML parsers normalise CRLF inside values
         out[m.group(1)] = keep
     return out
 
 
-def test_track_dicts_byte_identical_to_sample(sample_xml):
+def _local_tz_matches_sample(raw: bytes, ours: bytes) -> bool:
+    """Raw 'Play Date' is local-time seconds: only comparable when this machine's tz == the sample's."""
+    rx = re.compile(rb"<key>Play Date</key><integer>(\d+)</integer>")
+    a, b = rx.findall(raw), rx.findall(ours)
+    return a == b
+
+
+@pytest.fixture(params=["samples", "samples/live"])
+def any_sample_xml(request):
+    p = ROOT / request.param / "iTunes Music Library.xml"
+    if not p.exists():
+        pytest.skip(f"{p} not present")
+    return p
+
+
+def test_track_dicts_byte_identical_to_sample(any_sample_xml):
+    sample_xml = any_sample_xml
     """Key order, escaping, dates, URL-encoding must match iTunes exactly (modeled keys)."""
     raw = sample_xml.read_bytes()
     ours = library_to_xml(read_xml(sample_xml))
-    a, b = _track_blocks(raw), _track_blocks(ours)
+    drop_local = not _local_tz_matches_sample(raw, ours)
+    a, b = _track_blocks(raw, drop_local), _track_blocks(ours, drop_local)
     assert a.keys() == b.keys()
     for tid in a:
         assert a[tid] == b[tid], tid
+
+
+def test_playlists_and_music_folder_byte_identical(any_sample_xml):
+    sample_xml = any_sample_xml
+    """Folders, smart playlists, special playlists, blobs and Music Folder: everything after Tracks."""
+    raw = sample_xml.read_bytes()
+    ours = library_to_xml(read_xml(sample_xml))
+    marker = b"	<key>Playlists</key>"
+    assert ours[ours.index(marker):] == raw[raw.index(marker):]
 
 
 def test_framing_matches_sample(sample_xml):
@@ -78,7 +113,7 @@ def test_master_and_music_playlist_layout():
     lib = Library(
         tracks=[Track(1, r"C:\m\a.mp3")],
         playlists=[
-            Playlist(10, "Library", [1], master=True),
+            Playlist(10, "Library", [1], master=True, visible=False),
             Playlist(11, "Music", [1], distinguished_kind=4),
             Playlist(12, "Empty"),
         ],
