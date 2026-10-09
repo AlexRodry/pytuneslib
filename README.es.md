@@ -24,7 +24,7 @@ Requiere Python 3.10 o superior.
 pip install -e ".[dev]"
 ```
 
-`setup.py` es un shim para que pip antiguo (< 21.3) pueda instalar en modo editable. La configuración real está en `pyproject.toml`.
+Para el modo editable hace falta pip >= 21.3 (`python -m pip install -U pip`). La configuración está en `pyproject.toml`.
 
 ## Uso desde la línea de comandos
 
