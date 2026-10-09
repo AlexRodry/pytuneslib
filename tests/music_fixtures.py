@@ -17,7 +17,7 @@ def music_dir(tmp_path_factory):
     Skipped when ffmpeg is missing. Expectations: ``music_expected`` / ``EXPECTED``.
     """
     if FFMPEG is None:
-        pytest.skip("ffmpeg not available (PATH or C:\Apps\Tools)")
+        pytest.skip(r"ffmpeg not available (PATH or C:\Apps\Tools)")
     return build_library(tmp_path_factory.mktemp("music"))
 
 

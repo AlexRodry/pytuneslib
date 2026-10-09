@@ -5,7 +5,7 @@ from __future__ import annotations
 import plistlib
 import re
 from datetime import datetime, timezone
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import unquote
 
 from .model import Library, Playlist, Track
@@ -23,7 +23,7 @@ def file_url_to_path(url: str) -> str:
     rest = unquote(rest)
     if re.match(r"^[A-Za-z]:/", rest):
         return str(PureWindowsPath(rest))
-    return "/" + rest.lstrip("/")
+    return str(PurePosixPath("/" + rest.lstrip("/")))  # drops the trailing '/' of folder urls
 
 
 def _utc(dt: datetime | None) -> datetime | None:
